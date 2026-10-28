@@ -12,6 +12,7 @@ import {
 } from "chart.js";
 
 import MicroIterChart, { type MicroIter } from "./MicroIterChart";
+import ConstraintsChart, { type AddedConstraints } from "./ConstraintsChart";
 import SubTimesChart from "./SubTimesChart";
 import MasterTimesChart, { type MasterTime } from "./MasterTimesChart";
 import { ResetZoomButton, useChartZoom } from "./zoom";
@@ -25,12 +26,13 @@ interface PlotData {
   best_ub: number[];
 }
 
-type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times";
+type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times" | "constraints";
 const TABS: { id: Tab; label: string }[] = [
   { id: "ub-lb", label: "UB-LB" },
   { id: "micro-iterations", label: "Micro-iterations" },
   { id: "sub-times", label: "Subproblem times" },
   { id: "master-times", label: "Master times" },
+  { id: "constraints", label: "Constraints" },
 ];
 
 function App() {
@@ -41,6 +43,7 @@ function App() {
   const zoom = useChartZoom();
   const [microIters, setMicroIters] = useState<MicroIter[]>([]);
   const [masterTimes, setMasterTimes] = useState<MasterTime[]>([]);
+  const [addedConstraints, setAddedConstraints] = useState<AddedConstraints[]>([]);
 
   // Skip first iteration
   const skip = 1;
@@ -122,6 +125,24 @@ function App() {
       }
     };
 
+    // Added constraints: incremental stream, same pattern; payloads can be large so poll less often.
+    const pollAddedConstraints = async () => {
+      let received = 0;
+      while (!cancelled) {
+        try {
+          const res = await fetch(`/api/added_constraints?since=${received}`);
+          const json: { total: number; items: AddedConstraints[] } = await res.json();
+          if (!cancelled && json.items.length) {
+            received += json.items.length;
+            setAddedConstraints((cur) => cur.concat(json.items));
+          }
+        } catch {
+          // server not reachable, retry on next tick
+        }
+        await sleep(1000);
+      }
+    };
+
     // Page load/refresh starts a fresh graph: clear server-side data, then start all
     // streams independently (none waits for another).
     fetch("/api/reset", { method: "POST" })
@@ -132,6 +153,7 @@ function App() {
         void pollSubproblems();
         void pollMicroIters();
         void pollMasterTimes();
+        void pollAddedConstraints();
       });
 
     return () => {
@@ -158,7 +180,7 @@ function App() {
     </button>
   );
 
-  const showSidebar = tab === "micro-iterations" && subNames.length > 0;
+  const showSidebar = (tab === "micro-iterations" || tab === "constraints") && subNames.length > 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", boxSizing: "border-box", background: "#fff", color: "#222" }}>
@@ -251,6 +273,15 @@ function App() {
               <MasterTimesChart items={masterTimes} />
             </div>
           )}
+
+          {tab === "constraints" &&
+            (subNames.length === 0 || !selectedSub ? (
+              <div style={{ color: "#777", fontSize: 14 }}>Waiting for subproblems…</div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                <ConstraintsChart items={addedConstraints} sub={selectedSub} />
+              </div>
+            ))}
         </div>
       </div>
     </div>

@@ -3,7 +3,7 @@ import cors from "cors";
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 const data: { iteration: number[]; lb: number[]; ub: number[]; best_ub: number[] } = {
   iteration: [], lb: [], ub: [], best_ub: [],
@@ -105,6 +105,65 @@ app.get("/api/master_times", (req, res) => {
   res.json({ total: masterTimes.length, items: masterTimes.slice(since) });
 });
 
+// Constraints added per micro-iteration, posted by every rank (MicroIterationsLog::DumpAddedConstraints).
+// Each record holds only that micro-iteration's new constraints; it matches the /micro_iter record
+// with the same (rank, sub_name, num_master_iter, num_micro_iter).
+interface AddedConstraints {
+  rank: number;
+  sub_name: string;
+  num_master_iter: number;
+  num_micro_iter: number;
+  constraints: { name: string; is_N: boolean }[];
+}
+const addedConstraints: AddedConstraints[] = [];
+
+app.post("/added_constraints", (req, res) => {
+  const b = req.body ?? {};
+  const ints = [b.rank, b.num_master_iter, b.num_micro_iter];
+  if (
+    typeof b.sub_name !== "string" ||
+    ints.some((v) => !Number.isInteger(v)) ||
+    !Array.isArray(b.constraints) ||
+    b.constraints.some(
+      (c: unknown) =>
+        typeof c !== "object" ||
+        c === null ||
+        typeof (c as { name?: unknown }).name !== "string" ||
+        typeof (c as { is_N?: unknown }).is_N !== "boolean",
+    )
+  ) {
+    return res.status(400).json({
+      error:
+        "rank, num_master_iter, num_micro_iter (int), sub_name (string), constraints ({ name: string, is_N: boolean }[]) required",
+    });
+  }
+  addedConstraints.push({
+    rank: b.rank,
+    sub_name: b.sub_name,
+    num_master_iter: b.num_master_iter,
+    num_micro_iter: b.num_micro_iter,
+    constraints: b.constraints.map((c: { name: string; is_N: boolean }) => ({ name: c.name, is_N: c.is_N })),
+  });
+  console.log(
+    `[POST added_constraints] ${b.sub_name} master=${b.num_master_iter} micro=${b.num_micro_iter} n=${b.constraints.length}`,
+  );
+  res.json({ ok: true, points: addedConstraints.length });
+});
+
+// Optional ?since=N (incremental polling); optional ?sub_name= and ?num_master_iter= filters.
+app.get("/api/added_constraints", (req, res) => {
+  const since = Math.max(0, Number.parseInt(String(req.query.since ?? "0"), 10) || 0);
+  let items = addedConstraints.slice(since);
+  if (typeof req.query.sub_name === "string") {
+    items = items.filter((r) => r.sub_name === req.query.sub_name);
+  }
+  if (req.query.num_master_iter !== undefined) {
+    const m = Number.parseInt(String(req.query.num_master_iter), 10);
+    items = items.filter((r) => r.num_master_iter === m);
+  }
+  res.json({ total: addedConstraints.length, items });
+});
+
 // Subproblem names, posted once by BendersMpi::InitializeProblems (rank 0) as a JSON array.
 // The array index is the subproblem id.
 let subproblemNames: string[] = [];
@@ -131,6 +190,7 @@ app.post("/api/reset", (_req, res) => {
   data.best_ub.length = 0;
   microIters.length = 0;
   masterTimes.length = 0;
+  addedConstraints.length = 0;
   res.json({ ok: true });
 });
 
