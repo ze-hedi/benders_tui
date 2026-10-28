@@ -68,8 +68,41 @@ app.post("/micro_iter", (req, res) => {
   res.json({ ok: true, points: microIters.length });
 });
 
-app.get("/api/micro_iter", (_req, res) => {
-  res.json(microIters);
+// Optional ?since=N returns only the records after the first N (incremental polling).
+app.get("/api/micro_iter", (req, res) => {
+  const since = Math.max(0, Number.parseInt(String(req.query.since ?? "0"), 10) || 0);
+  res.json({ total: microIters.length, items: microIters.slice(since) });
+});
+
+// Master iteration times, posted once per master iteration by rank 0 (MicroIterationsHttpSender).
+interface MasterTime {
+  num_master_iter: number;
+  elapsed_time: number;
+  master_resolution_time: number;
+}
+const masterTimes: MasterTime[] = [];
+
+app.post("/master_times", (req, res) => {
+  const b = req.body ?? {};
+  const elapsed_time = Number(b.elapsed_time);
+  const master_resolution_time = Number(b.master_resolution_time);
+  if (
+    !Number.isInteger(b.num_master_iter) ||
+    Number.isNaN(elapsed_time) ||
+    Number.isNaN(master_resolution_time)
+  ) {
+    return res.status(400).json({
+      error: "num_master_iter (int), elapsed_time, master_resolution_time (numeric) required",
+    });
+  }
+  masterTimes.push({ num_master_iter: b.num_master_iter, elapsed_time, master_resolution_time });
+  console.log(`[POST master_times] master=${b.num_master_iter} resolution=${master_resolution_time}`);
+  res.json({ ok: true, points: masterTimes.length });
+});
+
+app.get("/api/master_times", (req, res) => {
+  const since = Math.max(0, Number.parseInt(String(req.query.since ?? "0"), 10) || 0);
+  res.json({ total: masterTimes.length, items: masterTimes.slice(since) });
 });
 
 // Subproblem names, posted once by BendersMpi::InitializeProblems (rank 0) as a JSON array.
@@ -97,6 +130,7 @@ app.post("/api/reset", (_req, res) => {
   data.ub.length = 0;
   data.best_ub.length = 0;
   microIters.length = 0;
+  masterTimes.length = 0;
   res.json({ ok: true });
 });
 

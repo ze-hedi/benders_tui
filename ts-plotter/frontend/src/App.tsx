@@ -11,6 +11,11 @@ import {
   Legend,
 } from "chart.js";
 
+import MicroIterChart, { type MicroIter } from "./MicroIterChart";
+import SubTimesChart from "./SubTimesChart";
+import MasterTimesChart, { type MasterTime } from "./MasterTimesChart";
+import { ResetZoomButton, useChartZoom } from "./zoom";
+
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
 interface PlotData {
@@ -20,8 +25,22 @@ interface PlotData {
   best_ub: number[];
 }
 
+type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "ub-lb", label: "UB-LB" },
+  { id: "micro-iterations", label: "Micro-iterations" },
+  { id: "sub-times", label: "Subproblem times" },
+  { id: "master-times", label: "Master times" },
+];
+
 function App() {
   const [data, setData] = useState<PlotData>({ iteration: [], lb: [], ub: [], best_ub: [] });
+  const [tab, setTab] = useState<Tab>("ub-lb");
+  const [subNames, setSubNames] = useState<string[]>([]);
+  const [selectedSub, setSelectedSub] = useState<string | null>(null);
+  const zoom = useChartZoom();
+  const [microIters, setMicroIters] = useState<MicroIter[]>([]);
+  const [masterTimes, setMasterTimes] = useState<MasterTime[]>([]);
 
   // Skip first iteration
   const skip = 1;
@@ -30,55 +49,208 @@ function App() {
   const lb = data.lb.slice(skip);
 
   useEffect(() => {
-    let id: ReturnType<typeof setInterval> | undefined;
     let cancelled = false;
-    // Page load/refresh starts a fresh graph: clear server-side data before polling.
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    // UB/LB stream: runs for the lifetime of the page, independent of the subproblem fetch.
+    const pollData = async () => {
+      while (!cancelled) {
+        try {
+          const res = await fetch("/api/data");
+          const json: PlotData = await res.json();
+          if (!cancelled) setData(json);
+        } catch {
+          // server not reachable, retry on next tick
+        }
+        await sleep(500);
+      }
+    };
+
+    // Subproblem names: polled every 5 ms, ends as soon as they are received.
+    const pollSubproblems = async () => {
+      while (!cancelled) {
+        try {
+          const names: string[] = await (await fetch("/api/set")).json();
+          if (names.length) {
+            if (!cancelled) {
+              setSubNames(names);
+              setSelectedSub((cur) => cur ?? names[0]);
+            }
+            return;
+          }
+        } catch {
+          // server not reachable, retry on next tick
+        }
+        await sleep(5);
+      }
+    };
+
+    // Micro-iterations: incremental stream, appended to App-level state so it survives
+    // tab/subproblem switches. `received` is only touched by this loop.
+    const pollMicroIters = async () => {
+      let received = 0;
+      while (!cancelled) {
+        try {
+          const res = await fetch(`/api/micro_iter?since=${received}`);
+          const json: { total: number; items: MicroIter[] } = await res.json();
+          if (!cancelled && json.items.length) {
+            received += json.items.length;
+            setMicroIters((cur) => cur.concat(json.items));
+          }
+        } catch {
+          // server not reachable, retry on next tick
+        }
+        await sleep(300);
+      }
+    };
+
+    // Master times: incremental stream, same pattern as micro-iterations.
+    const pollMasterTimes = async () => {
+      let received = 0;
+      while (!cancelled) {
+        try {
+          const res = await fetch(`/api/master_times?since=${received}`);
+          const json: { total: number; items: MasterTime[] } = await res.json();
+          if (!cancelled && json.items.length) {
+            received += json.items.length;
+            setMasterTimes((cur) => cur.concat(json.items));
+          }
+        } catch {
+          // server not reachable, retry on next tick
+        }
+        await sleep(300);
+      }
+    };
+
+    // Page load/refresh starts a fresh graph: clear server-side data, then start all
+    // streams independently (none waits for another).
     fetch("/api/reset", { method: "POST" })
       .catch(() => {})
       .then(() => {
         if (cancelled) return;
-        id = setInterval(async () => {
-          const res = await fetch("/api/data");
-          setData(await res.json());
-        }, 500);
+        void pollData();
+        void pollSubproblems();
+        void pollMicroIters();
+        void pollMasterTimes();
       });
+
     return () => {
       cancelled = true;
-      clearInterval(id);
     };
   }, []);
 
+  const tabButton = (t: { id: Tab; label: string }) => (
+    <button
+      key={t.id}
+      onClick={() => setTab(t.id)}
+      style={{
+        padding: "14px 20px",
+        border: "none",
+        borderBottom: tab === t.id ? "2px solid #2e86de" : "2px solid transparent",
+        background: "transparent",
+        color: tab === t.id ? "#2e86de" : "#555",
+        fontSize: 14,
+        fontWeight: 600,
+        cursor: "pointer",
+      }}
+    >
+      {t.label}
+    </button>
+  );
+
+  const showSidebar = tab === "micro-iterations" && subNames.length > 0;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", boxSizing: "border-box", padding: "24px 32px", background: "#fff", color: "#222" }}>
-      <h1 style={{ margin: "0 0 16px", fontSize: 20, fontWeight: 600 }}>Benders convergence</h1>
-      <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
-        <div style={{ position: "relative", width: "100%", height: "100%" }}>
-        <Line
-          options={{
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false,
-            plugins: { legend: { position: "top" } },
-            scales: {
-              x: { title: { display: true, text: "Iteration" }, border: { display: true, color: "#888" }, grid: { color: "#f0f0f0" } },
-              y: {
-                title: { display: true, text: "Value" },
-                border: { display: true, color: "#888" },
-                grid: { color: "#f0f0f0" },
-                beginAtZero: !lb.length,
-                min: lb.length ? Math.min(...lb) * 0.95 : undefined,
-                max: ub.length ? Math.max(...ub) * 1.05 : undefined,
-              },
-            },
-          }}
-          data={{
-            labels: iterations,
-            datasets: [
-              { label: "UB", data: ub, borderColor: "#e74c3c", borderWidth: 2, pointRadius: 2, fill: false, tension: 0.2 },
-              { label: "LB", data: lb, borderColor: "#2e86de", borderWidth: 2, pointRadius: 2, fill: false, tension: 0.2 },
-            ],
-          }}
-        />
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", boxSizing: "border-box", background: "#fff", color: "#222" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 32px", borderBottom: "1px solid #e5e7eb" }}>
+        <h1 style={{ margin: "0 24px 0 0", fontSize: 18, fontWeight: 600 }}>Benders</h1>
+        {TABS.map(tabButton)}
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        {showSidebar && (
+          <div style={{ width: 220, flexShrink: 0, overflowY: "auto", borderRight: "1px solid #e5e7eb", padding: "12px 0" }}>
+            {subNames.map((name) => (
+              <button
+                key={name}
+                onClick={() => setSelectedSub(name)}
+                title={name}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "8px 20px",
+                  border: "none",
+                  borderLeft: selectedSub === name ? "3px solid #2e86de" : "3px solid transparent",
+                  background: selectedSub === name ? "#eef5fd" : "transparent",
+                  color: selectedSub === name ? "#2e86de" : "#333",
+                  textAlign: "left",
+                  fontSize: 13,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  cursor: "pointer",
+                }}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div style={{ flex: 1, minWidth: 0, boxSizing: "border-box", padding: "24px 32px", display: "flex", flexDirection: "column" }}>
+          <div style={{ display: tab === "ub-lb" ? "block" : "none", flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+              <div style={{ position: "relative", width: "100%", height: "100%" }}>
+                <ResetZoomButton onClick={zoom.reset} />
+                <Line
+                  ref={zoom.chartRef as never}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: { legend: { position: "top" }, zoom: zoom.plugin },
+                    scales: {
+                      x: { title: { display: true, text: "Iteration" }, border: { display: true, color: "#888" }, grid: { color: "#f0f0f0" }, min: zoom.saved.current.x?.min, max: zoom.saved.current.x?.max },
+                      y: {
+                        title: { display: true, text: "Value" },
+                        border: { display: true, color: "#888" },
+                        grid: { color: "#f0f0f0" },
+                        beginAtZero: !lb.length,
+                        min: zoom.saved.current.y?.min ?? (lb.length ? Math.min(...lb) * 0.95 : undefined),
+                        max: zoom.saved.current.y?.max ?? (ub.length ? Math.max(...ub) * 1.05 : undefined),
+                      },
+                    },
+                  }}
+                  data={{
+                    labels: iterations,
+                    datasets: [
+                      { label: "UB", data: ub, borderColor: "#e74c3c", borderWidth: 2, pointRadius: 2, fill: false, tension: 0.2 },
+                      { label: "LB", data: lb, borderColor: "#2e86de", borderWidth: 2, pointRadius: 2, fill: false, tension: 0.2 },
+                    ],
+                  }}
+                />
+              </div>
+            </div>
+
+          {tab === "micro-iterations" &&
+            (subNames.length === 0 || !selectedSub ? (
+              <div style={{ color: "#777", fontSize: 14 }}>Waiting for subproblems…</div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                <MicroIterChart items={microIters} sub={selectedSub} />
+              </div>
+            ))}
+
+          {tab === "sub-times" && (
+            <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+              <SubTimesChart items={microIters} subNames={subNames} />
+            </div>
+          )}
+
+          {tab === "master-times" && (
+            <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+              <MasterTimesChart items={masterTimes} />
+            </div>
+          )}
         </div>
       </div>
     </div>
