@@ -20,7 +20,7 @@ app.post("/end", (_req, res) => {
   ended = true;
   console.log("[POST end] algorithm finished, frontend polling will stop");
   // The run is complete: save automatically.
-  const err = saveSnapshot(savePath(DEFAULT_SAVE_NAME)!);
+  const err = saveSnapshot(savePath(currentSaveName)!);
   if (err) console.error(`[POST end] auto-save failed: ${err}`);
   res.json({ ok: true, saved: !err });
 });
@@ -277,6 +277,16 @@ app.post("/api/reset", (_req, res) => {
 // Save/load: snapshot of everything above, stored in the repo root so it can be committed/shared.
 const SAVE_DIR = path.resolve(__dirname, "..");
 const DEFAULT_SAVE_NAME = "benders_save";
+
+// Name chosen on the landing page when starting a stream; /end auto-saves to it.
+let currentSaveName = DEFAULT_SAVE_NAME;
+app.post("/api/save_name", (req, res) => {
+  const file = savePath(req.body?.name);
+  if (!file) return res.status(400).json({ error: "invalid file name (letters, digits, space, _ - . only)" });
+  currentSaveName = path.basename(file, ".json");
+  console.log(`[save_name] ${currentSaveName}`);
+  res.json({ ok: true, name: currentSaveName });
+});
 
 // Maps a user-supplied name to a file in SAVE_DIR; null if the name is not a plain file name.
 function savePath(name: unknown): string | null {

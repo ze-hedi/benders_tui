@@ -49,7 +49,8 @@ const HEAT_MODES: { id: HeatMode; label: string }[] = [
   { id: "per-subproblem", label: "Common per subproblem" },
 ];
 
-function App() {
+// saveName: file chosen on the landing page; Save and Load use it, and the server auto-saves to it.
+function App({ saveName }: { saveName: string }) {
   const [data, setData] = useState<PlotData>({ iteration: [], lb: [], ub: [], best_ub: [] });
   const [tab, setTab] = useState<Tab>("convergence");
   const [subNames, setSubNames] = useState<string[]>([]);
@@ -70,19 +71,15 @@ function App() {
   const stopPolling = useRef<() => void>(() => {});
   const [status, setStatus] = useState<string | null>(null);
 
-  // Name of the last file saved/loaded; Load reads it back. Empty = server default.
-  const [saveName, setSaveName] = useState("");
-  const [showSaveDialog, setShowSaveDialog] = useState(false);
 
-  const save = async (name: string) => {
+  const save = async () => {
     try {
       const res = await fetch("/api/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name: saveName }),
       });
       const json = await res.json();
-      if (res.ok) setSaveName(name);
       setStatus(res.ok ? "Saved" : (json.error ?? "Save failed"));
     } catch {
       setStatus("Save failed: server not reachable");
@@ -270,10 +267,10 @@ function App() {
 
     stopPolling.current = () => {
       cancelled = true;
-      events.close();
     };
     return () => {
       cancelled = true;
+      events.close();
     };
   }, []);
 
@@ -321,7 +318,7 @@ function App() {
         {TABS.map(tabButton)}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           {status && <span style={{ fontSize: 13, color: "#555" }}>{status}</span>}
-          {[["Save", () => setShowSaveDialog(true)], ["Load", load]].map(([label, fn]) => (
+          {[["Save", save], ["Load", load]].map(([label, fn]) => (
             <button
               key={label as string}
               onClick={fn as () => void}
@@ -332,42 +329,6 @@ function App() {
           ))}
         </div>
       </div>
-
-      {showSaveDialog && (
-        <div
-          onClick={() => setShowSaveDialog(false)}
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}
-        >
-          <form
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={(e) => {
-              e.preventDefault();
-              setShowSaveDialog(false);
-              save(saveName);
-            }}
-            style={{ background: "#fff", borderRadius: 8, padding: 20, width: 340, boxShadow: "0 8px 30px rgba(0,0,0,0.2)" }}
-          >
-            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 10 }}>Save as</div>
-            <input
-              autoFocus
-              value={saveName}
-              onChange={(e) => setSaveName(e.target.value)}
-              onKeyDown={(e) => e.key === "Escape" && setShowSaveDialog(false)}
-              placeholder="benders_save"
-              style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", border: "1px solid #ccc", borderRadius: 6, fontSize: 14 }}
-            />
-            <div style={{ fontSize: 12, color: "#777", margin: "6px 0 14px" }}>Saved as &lt;name&gt;.json in the project root.</div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button type="button" onClick={() => setShowSaveDialog(false)} style={{ padding: "6px 14px", border: "1px solid #ccc", borderRadius: 6, background: "#fff", fontSize: 13, cursor: "pointer" }}>
-                Cancel
-              </button>
-              <button type="submit" style={{ padding: "6px 14px", border: "1px solid #2e86de", borderRadius: 6, background: "#2e86de", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                Save
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
 
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         {showSidebar && (
