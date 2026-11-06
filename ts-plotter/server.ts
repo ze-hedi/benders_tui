@@ -1,9 +1,29 @@
 import express from "express";
 import cors from "cors";
+import fs from "node:fs";
+import path from "node:path";
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+
+// Set by POST /end when the algorithm finishes. Every /api response carries it as the
+// X-Ended header, so the frontend stops polling after one last (complete) fetch.
+let ended = false;
+app.use("/api", (_req, res, next) => {
+  res.setHeader("X-Ended", String(ended));
+  res.setHeader("Access-Control-Expose-Headers", "X-Ended");
+  next();
+});
+
+app.post("/end", (_req, res) => {
+  ended = true;
+  console.log("[POST end] algorithm finished, frontend polling will stop");
+  // The run is complete: save automatically.
+  const err = saveSnapshot();
+  if (err) console.error(`[POST end] auto-save failed: ${err}`);
+  res.json({ ok: true, saved: !err });
+});
 
 const data: { iteration: number[]; lb: number[]; ub: number[]; best_ub: number[] } = {
   iteration: [], lb: [], ub: [], best_ub: [],
@@ -36,6 +56,10 @@ interface MicroIter {
   nb_added_constraints: number;
   solving_time: number;
   elapsed_time: number;
+  n_saturated_constraints: number;
+  n_all_constraints: number;
+  n_added_constraints_N: number;
+  n_added_constraints_NK: number;
 }
 const microIters: MicroIter[] = [];
 
@@ -43,7 +67,12 @@ app.post("/micro_iter", (req, res) => {
   const b = req.body ?? {};
   const solving_time = Number(b.solving_time);
   const elapsed_time = Number(b.elapsed_time);
-  const ints = [b.rank, b.num_master_iter, b.num_micro_iter, b.nb_added_constraints];
+  const ints = [b.rank, b.num_master_iter, b.num_micro_iter, b.nb_added_constraints,
+    b.n_saturated_constraints,
+    b.n_all_constraints,
+    b.n_added_constraints_N,
+    b.n_added_constraints_NK,
+  ];
   if (
     typeof b.sub_name !== "string" ||
     ints.some((v) => !Number.isInteger(v)) ||
@@ -52,7 +81,7 @@ app.post("/micro_iter", (req, res) => {
   ) {
     return res.status(400).json({
       error:
-        "rank, num_master_iter, num_micro_iter, nb_added_constraints (int), sub_name (string), solving_time, elapsed_time (numeric) required",
+        "rank, num_master_iter, num_micro_iter, nb_added_constraints, n_saturated_constraints, n_all_constraints, n_added_constraints_N, n_added_constraints_NK (int), sub_name (string), solving_time, elapsed_time (numeric) required",
     });
   }
   microIters.push({
@@ -63,8 +92,14 @@ app.post("/micro_iter", (req, res) => {
     nb_added_constraints: b.nb_added_constraints,
     solving_time,
     elapsed_time,
+    n_saturated_constraints: b.n_saturated_constraints,
+    n_all_constraints: b.n_all_constraints,
+    n_added_constraints_N: b.n_added_constraints_N,
+    n_added_constraints_NK: b.n_added_constraints_NK,
   });
-  console.log(`[POST micro_iter] ${b.sub_name} master=${b.num_master_iter} micro=${b.num_micro_iter}`);
+  console.log(
+    `[POST micro_iter] ${b.sub_name} master=${b.num_master_iter} micro=${b.num_micro_iter} saturated=${b.n_saturated_constraints} all=${b.n_all_constraints}`,
+  );
   res.json({ ok: true, points: microIters.length });
 });
 
@@ -183,6 +218,7 @@ app.get("/api/set", (_req, res) => {
 });
 
 app.post("/api/reset", (_req, res) => {
+  ended = false;
   subproblemNames = [];
   data.iteration.length = 0;
   data.lb.length = 0;
@@ -192,6 +228,53 @@ app.post("/api/reset", (_req, res) => {
   masterTimes.length = 0;
   addedConstraints.length = 0;
   res.json({ ok: true });
+});
+
+// Save/load: snapshot of everything above, stored in the repo root so it can be committed/shared.
+const SAVE_FILE = path.resolve(__dirname, "..", "benders_save.json");
+
+// Returns an error message, or null on success.
+function saveSnapshot(): string | null {
+  const snapshot = { data, subproblemNames, microIters, masterTimes, addedConstraints };
+  try {
+    fs.writeFileSync(SAVE_FILE, JSON.stringify(snapshot));
+  } catch (e) {
+    return `could not write save file: ${(e as Error).message}`;
+  }
+  console.log(`[save] ${SAVE_FILE}`);
+  return null;
+}
+
+app.post("/api/save", (_req, res) => {
+  const err = saveSnapshot();
+  if (err) return res.status(500).json({ error: err });
+  res.json({ ok: true, file: SAVE_FILE, points: data.iteration.length });
+});
+
+// Replaces the server state with the saved snapshot and flags the run as ended so a
+// (re)connecting frontend does not wait for more data. Responds with the snapshot.
+app.post("/api/load", (_req, res) => {
+  let snap: any;
+  try {
+    snap = JSON.parse(fs.readFileSync(SAVE_FILE, "utf8"));
+  } catch (e) {
+    const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
+    return res.status(missing ? 404 : 500).json({
+      error: missing ? "no save file found, click Save first" : `could not read save file: ${(e as Error).message}`,
+    });
+  }
+  data.iteration = snap.data?.iteration ?? [];
+  data.lb = snap.data?.lb ?? [];
+  data.ub = snap.data?.ub ?? [];
+  data.best_ub = snap.data?.best_ub ?? [];
+  subproblemNames = snap.subproblemNames ?? [];
+  microIters.splice(0, microIters.length, ...(snap.microIters ?? []));
+  masterTimes.splice(0, masterTimes.length, ...(snap.masterTimes ?? []));
+  addedConstraints.splice(0, addedConstraints.length, ...(snap.addedConstraints ?? []));
+  ended = true;
+  res.setHeader("X-Ended", "true");
+  console.log(`[POST load] ${SAVE_FILE} (${data.iteration.length} points)`);
+  res.json({ data, subproblemNames, microIters, masterTimes, addedConstraints });
 });
 
 app.listen(3123, () => console.log("Server running on http://localhost:3123"));

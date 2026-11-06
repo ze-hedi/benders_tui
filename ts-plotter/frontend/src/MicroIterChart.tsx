@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Bar } from "react-chartjs-2";
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Tooltip, Legend } from "chart.js";
 
@@ -14,12 +14,18 @@ export interface MicroIter {
   nb_added_constraints: number;
   solving_time: number;
   elapsed_time: number;
+  n_saturated_constraints: number;
+  n_all_constraints: number;
+  n_added_constraints_N: number;
+  n_added_constraints_NK: number;
 }
 
 const colorFor = (micro: number) => `hsl(${(micro * 137.508) % 360} 65% 52%)`;
 
 export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub: string }) {
   const { chartRef, saved, plugin, reset } = useChartZoom();
+  const [detail, setDetail] = useState(false);
+  const [selectedMaster, setSelectedMaster] = useState<number | null>(null);
   const { masters, micros, cell } = useMemo(() => {
     const cell = new Map<string, MicroIter>();
     const masterSet = new Set<number>();
@@ -43,8 +49,92 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
   const sx = saved.current.x;
   const sy = saved.current.y;
 
+  // N / NK detail: one pair of bars per micro-iteration of the chosen Benders iteration.
+  // Derived from `items` on every render, so it updates as new micro-iterations arrive.
+  const detailMicros =
+    selectedMaster === null ? [] : micros.filter((micro) => lookup(selectedMaster, micro));
+
+  const toolbar = (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+      <button
+        onClick={() => setDetail((d) => !d)}
+        style={{
+          padding: "4px 12px",
+          border: "1px solid #2e86de",
+          borderRadius: 6,
+          background: detail ? "#2e86de" : "#fff",
+          color: detail ? "#fff" : "#2e86de",
+          fontSize: 13,
+          cursor: "pointer",
+        }}
+      >
+        {detail ? "Back to time chart" : "N / NK constraints"}
+      </button>
+      {detail && (
+        <select
+          value={selectedMaster ?? ""}
+          onChange={(e) => setSelectedMaster(e.target.value === "" ? null : Number(e.target.value))}
+          style={{ padding: "4px 8px", fontSize: 13 }}
+        >
+          <option value="">Select an iteration…</option>
+          {masters.map((m) => (
+            <option key={m} value={m}>
+              Iteration {m}
+            </option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+
+  if (detail) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
+        {toolbar}
+        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          {selectedMaster === null ? (
+            <div style={{ color: "#777", fontSize: 14 }}>Select an iteration to see its N / NK constraints.</div>
+          ) : (
+            <Bar
+              options={{
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                plugins: {
+                  legend: { position: "top" },
+                  title: { display: true, text: `${sub} · iteration ${selectedMaster}` },
+                },
+                scales: {
+                  x: { title: { display: true, text: "Micro-iteration" }, grid: { display: false } },
+                  y: { title: { display: true, text: "Added constraints" }, beginAtZero: true, ticks: { precision: 0 }, grid: { color: "#f0f0f0" } },
+                },
+              }}
+              data={{
+                labels: detailMicros,
+                datasets: [
+                  {
+                    label: "N",
+                    backgroundColor: "#2e86de",
+                    data: detailMicros.map((micro) => lookup(selectedMaster, micro)!.n_added_constraints_N),
+                  },
+                  {
+                    label: "NK",
+                    backgroundColor: "#e67e22",
+                    data: detailMicros.map((micro) => lookup(selectedMaster, micro)!.n_added_constraints_NK),
+                  },
+                ],
+              }}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+    <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
+      {toolbar}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
       <ResetZoomButton onClick={reset} />
       <Bar
         ref={chartRef as never}
@@ -63,11 +153,16 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
                 label: (ctx) => {
                   const it = lookup(masters[ctx.dataIndex], micros[ctx.datasetIndex]);
                   if (!it) return "";
-                  return [
+                  const lines = [
                     `elapsed_time: ${it.elapsed_time}`,
                     `solving_time: ${it.solving_time}`,
                     `added constraints: ${it.nb_added_constraints}`,
                   ];
+                  if (it.n_all_constraints > 0) {
+                    const rate = (100 * it.n_saturated_constraints) / it.n_all_constraints;
+                    lines.push(`saturated constraint rate: ${rate.toFixed(1)}%`);
+                  }
+                  return lines;
                 },
               },
             },
@@ -91,6 +186,7 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
           })),
         }}
       />
+      </div>
     </div>
   );
 }

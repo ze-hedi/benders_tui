@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -13,6 +13,7 @@ import {
 
 import MicroIterChart, { type MicroIter } from "./MicroIterChart";
 import ConstraintsChart, { type AddedConstraints } from "./ConstraintsChart";
+import HeatmapChart from "./HeatmapChart";
 import SubTimesChart from "./SubTimesChart";
 import MasterTimesChart, { type MasterTime } from "./MasterTimesChart";
 import { ResetZoomButton, useChartZoom } from "./zoom";
@@ -26,13 +27,14 @@ interface PlotData {
   best_ub: number[];
 }
 
-type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times" | "constraints";
+type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times" | "constraints" | "heatmap";
 const TABS: { id: Tab; label: string }[] = [
   { id: "ub-lb", label: "UB-LB" },
   { id: "micro-iterations", label: "Micro-iterations" },
   { id: "sub-times", label: "Subproblem times" },
   { id: "master-times", label: "Master times" },
   { id: "constraints", label: "Constraints" },
+  { id: "heatmap", label: "Heatmap" },
 ];
 
 function App() {
@@ -45,6 +47,43 @@ function App() {
   const [masterTimes, setMasterTimes] = useState<MasterTime[]>([]);
   const [addedConstraints, setAddedConstraints] = useState<AddedConstraints[]>([]);
 
+  const stopPolling = useRef<() => void>(() => {});
+  const [status, setStatus] = useState<string | null>(null);
+
+  const save = async () => {
+    try {
+      const res = await fetch("/api/save", { method: "POST" });
+      const json = await res.json();
+      setStatus(res.ok ? "Saved" : (json.error ?? "Save failed"));
+    } catch {
+      setStatus("Save failed: server not reachable");
+    }
+  };
+
+  const load = async () => {
+    try {
+      const res = await fetch("/api/load", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) return setStatus(json.error ?? "Load failed");
+      stopPolling.current(); // the loaded snapshot is final: stop live streams
+      setData(json.data);
+      setSubNames(json.subproblemNames);
+      setSelectedSub(json.subproblemNames[0] ?? null);
+      setMicroIters(json.microIters);
+      setMasterTimes(json.masterTimes);
+      setAddedConstraints(json.addedConstraints);
+      setStatus("Loaded");
+    } catch {
+      setStatus("Load failed: server not reachable");
+    }
+  };
+
+  useEffect(() => {
+    if (!status) return;
+    const t = setTimeout(() => setStatus(null), 3000);
+    return () => clearTimeout(t);
+  }, [status]);
+
   // Skip first iteration
   const skip = 1;
   const iterations = data.iteration.slice(skip);
@@ -54,6 +93,9 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    // The server flags the end of the algorithm on every /api response (POST /end). The flag is
+    // only set after all data was posted, so the response carrying it is the last one needed.
+    const isEnded = (res: Response) => res.headers.get("X-Ended") === "true";
 
     // UB/LB stream: runs for the lifetime of the page, independent of the subproblem fetch.
     const pollData = async () => {
@@ -62,6 +104,7 @@ function App() {
           const res = await fetch("/api/data");
           const json: PlotData = await res.json();
           if (!cancelled) setData(json);
+          if (isEnded(res)) return;
         } catch {
           // server not reachable, retry on next tick
         }
@@ -73,7 +116,8 @@ function App() {
     const pollSubproblems = async () => {
       while (!cancelled) {
         try {
-          const names: string[] = await (await fetch("/api/set")).json();
+          const res = await fetch("/api/set");
+          const names: string[] = await res.json();
           if (names.length) {
             if (!cancelled) {
               setSubNames(names);
@@ -81,6 +125,7 @@ function App() {
             }
             return;
           }
+          if (isEnded(res)) return;
         } catch {
           // server not reachable, retry on next tick
         }
@@ -100,6 +145,7 @@ function App() {
             received += json.items.length;
             setMicroIters((cur) => cur.concat(json.items));
           }
+          if (isEnded(res)) return;
         } catch {
           // server not reachable, retry on next tick
         }
@@ -118,6 +164,7 @@ function App() {
             received += json.items.length;
             setMasterTimes((cur) => cur.concat(json.items));
           }
+          if (isEnded(res)) return;
         } catch {
           // server not reachable, retry on next tick
         }
@@ -136,6 +183,7 @@ function App() {
             received += json.items.length;
             setAddedConstraints((cur) => cur.concat(json.items));
           }
+          if (isEnded(res)) return;
         } catch {
           // server not reachable, retry on next tick
         }
@@ -156,6 +204,9 @@ function App() {
         void pollAddedConstraints();
       });
 
+    stopPolling.current = () => {
+      cancelled = true;
+    };
     return () => {
       cancelled = true;
     };
@@ -180,13 +231,26 @@ function App() {
     </button>
   );
 
-  const showSidebar = (tab === "micro-iterations" || tab === "constraints") && subNames.length > 0;
+  const showSidebar =
+    (tab === "micro-iterations" || tab === "constraints" || tab === "heatmap") && subNames.length > 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", boxSizing: "border-box", background: "#fff", color: "#222" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 32px", borderBottom: "1px solid #e5e7eb" }}>
         <h1 style={{ margin: "0 24px 0 0", fontSize: 18, fontWeight: 600 }}>Benders</h1>
         {TABS.map(tabButton)}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          {status && <span style={{ fontSize: 13, color: "#555" }}>{status}</span>}
+          {[["Save", save], ["Load", load]].map(([label, fn]) => (
+            <button
+              key={label as string}
+              onClick={fn as () => void}
+              style={{ padding: "6px 14px", border: "1px solid #2e86de", borderRadius: 6, background: "#fff", color: "#2e86de", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >
+              {label as string}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
@@ -280,6 +344,15 @@ function App() {
             ) : (
               <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
                 <ConstraintsChart items={addedConstraints} sub={selectedSub} />
+              </div>
+            ))}
+
+          {tab === "heatmap" &&
+            (subNames.length === 0 || !selectedSub ? (
+              <div style={{ color: "#777", fontSize: 14 }}>Waiting for subproblems…</div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                <HeatmapChart items={addedConstraints} sub={selectedSub} />
               </div>
             ))}
         </div>
