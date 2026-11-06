@@ -230,12 +230,24 @@ app.get("/api/added_constraints", (req, res) => {
 // The array index is the subproblem id.
 let subproblemNames: string[] = [];
 
+// Open frontends listen here (SSE); a POST /set means a new experiment started, so they reload.
+const eventClients = new Set<express.Response>();
+app.get("/api/events", (req, res) => {
+  res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+  res.flushHeaders();
+  res.write(": connected\n\n");
+  eventClients.add(res);
+  req.on("close", () => eventClients.delete(res));
+});
+
 app.post("/set", (req, res) => {
   const names = req.body;
   if (!Array.isArray(names) || names.some((n) => typeof n !== "string")) {
     return res.status(400).json({ error: "body must be a JSON array of strings" });
   }
+  clearState();
   subproblemNames = names;
+  for (const c of eventClients) c.write("event: new-run\ndata: {}\n\n");
   console.log(`[POST set] ${names.length} subproblems`);
   res.json({ ok: true, count: names.length });
 });
@@ -244,7 +256,7 @@ app.get("/api/set", (_req, res) => {
   res.json(subproblemNames);
 });
 
-app.post("/api/reset", (_req, res) => {
+function clearState() {
   ended = false;
   subproblemNames = [];
   data.iteration.length = 0;
@@ -255,6 +267,10 @@ app.post("/api/reset", (_req, res) => {
   masterTimes.length = 0;
   addedCuts.length = 0;
   addedConstraints.length = 0;
+}
+
+app.post("/api/reset", (_req, res) => {
+  clearState();
   res.json({ ok: true });
 });
 

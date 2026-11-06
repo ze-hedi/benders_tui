@@ -247,7 +247,16 @@ function App() {
 
     // Page load/refresh starts a fresh graph: clear server-side data, then start all
     // streams independently (none waits for another).
-    fetch("/api/reset", { method: "POST" })
+    // A reload triggered by a new run (POST /set) must keep the server state it just received.
+    const fromNewRun = sessionStorage.getItem("skipReset") === "1";
+    sessionStorage.removeItem("skipReset");
+    const events = new EventSource("/api/events");
+    events.addEventListener("new-run", () => {
+      sessionStorage.setItem("skipReset", "1");
+      window.location.reload();
+    });
+
+    (fromNewRun ? Promise.resolve() : fetch("/api/reset", { method: "POST" }))
       .catch(() => {})
       .then(() => {
         if (cancelled) return;
@@ -261,6 +270,7 @@ function App() {
 
     stopPolling.current = () => {
       cancelled = true;
+      events.close();
     };
     return () => {
       cancelled = true;
