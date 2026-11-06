@@ -14,8 +14,10 @@ import {
 import MicroIterChart, { type MicroIter } from "./MicroIterChart";
 import ConstraintsChart, { type AddedConstraints } from "./ConstraintsChart";
 import HeatmapChart from "./HeatmapChart";
+import type { HeatSource } from "./heatmapColor";
 import IterationHeatmapChart, { masterIterations } from "./IterationHeatmapChart";
 import SubTimesChart from "./SubTimesChart";
+import CumulativeCutsChart from "./CumulativeCutsChart";
 import MasterTimesChart, { type MasterTime } from "./MasterTimesChart";
 import { ResetZoomButton, useChartZoom } from "./zoom";
 
@@ -28,36 +30,59 @@ interface PlotData {
   best_ub: number[];
 }
 
-type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times" | "constraints" | "heatmap" | "heatmap-iter";
+type Tab = "convergence" | "subproblems" | "master-times";
+type SubView = "micro-iterations" | "sub-times" | "constraints" | "heatmap";
+type HeatMode = "per-iteration" | "per-subproblem";
 const TABS: { id: Tab; label: string }[] = [
-  { id: "ub-lb", label: "UB-LB" },
+  { id: "convergence", label: "Convergence" },
+  { id: "subproblems", label: "Subproblems" },
+  { id: "master-times", label: "Master" },
+];
+const SUB_VIEWS: { id: SubView; label: string }[] = [
   { id: "micro-iterations", label: "Micro-iterations" },
   { id: "sub-times", label: "Subproblem times" },
-  { id: "master-times", label: "Master times" },
   { id: "constraints", label: "Constraints" },
-  { id: "heatmap", label: "Common per iteration" },
-  { id: "heatmap-iter", label: "Common per subproblem" },
+  { id: "heatmap", label: "Heatmap" },
+];
+const HEAT_MODES: { id: HeatMode; label: string }[] = [
+  { id: "per-iteration", label: "Common per iteration" },
+  { id: "per-subproblem", label: "Common per subproblem" },
 ];
 
 function App() {
   const [data, setData] = useState<PlotData>({ iteration: [], lb: [], ub: [], best_ub: [] });
-  const [tab, setTab] = useState<Tab>("ub-lb");
+  const [tab, setTab] = useState<Tab>("convergence");
   const [subNames, setSubNames] = useState<string[]>([]);
+  const [subView, setSubView] = useState<SubView>("micro-iterations");
+  const [heatMode, setHeatMode] = useState<HeatMode>("per-iteration");
+  const [heatSource, setHeatSource] = useState<HeatSource>("all");
   const [selectedSub, setSelectedSub] = useState<string | null>(null);
   // null = follow the latest master iteration as new ones arrive
   const [selectedIter, setSelectedIter] = useState<number | null>(null);
   const zoom = useChartZoom();
+  // Convergence curves hidden via the legend; the y axis rescales to the visible ones only.
+  const [hiddenSeries, setHiddenSeries] = useState<Record<string, boolean>>({});
   const [microIters, setMicroIters] = useState<MicroIter[]>([]);
   const [masterTimes, setMasterTimes] = useState<MasterTime[]>([]);
+  const [addedCuts, setAddedCuts] = useState<number[]>([]);
   const [addedConstraints, setAddedConstraints] = useState<AddedConstraints[]>([]);
 
   const stopPolling = useRef<() => void>(() => {});
   const [status, setStatus] = useState<string | null>(null);
 
-  const save = async () => {
+  // Name of the last file saved/loaded; Load reads it back. Empty = server default.
+  const [saveName, setSaveName] = useState("");
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+
+  const save = async (name: string) => {
     try {
-      const res = await fetch("/api/save", { method: "POST" });
+      const res = await fetch("/api/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
       const json = await res.json();
+      if (res.ok) setSaveName(name);
       setStatus(res.ok ? "Saved" : (json.error ?? "Save failed"));
     } catch {
       setStatus("Save failed: server not reachable");
@@ -66,7 +91,11 @@ function App() {
 
   const load = async () => {
     try {
-      const res = await fetch("/api/load", { method: "POST" });
+      const res = await fetch("/api/load", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: saveName }),
+      });
       const json = await res.json();
       if (!res.ok) return setStatus(json.error ?? "Load failed");
       stopPolling.current(); // the loaded snapshot is final: stop live streams
@@ -75,6 +104,7 @@ function App() {
       setSelectedSub(json.subproblemNames[0] ?? null);
       setMicroIters(json.microIters);
       setMasterTimes(json.masterTimes);
+      setAddedCuts(json.addedCuts ?? []);
       setAddedConstraints(json.addedConstraints);
       setStatus("Loaded");
     } catch {
@@ -93,6 +123,7 @@ function App() {
   const iterations = data.iteration.slice(skip);
   const ub = data.ub.slice(skip);
   const lb = data.lb.slice(skip);
+  const bestUb = data.best_ub.slice(skip);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,6 +207,25 @@ function App() {
       }
     };
 
+    // Cuts added to the master per iteration: incremental stream, same pattern.
+    const pollAddedCuts = async () => {
+      let received = 0;
+      while (!cancelled) {
+        try {
+          const res = await fetch(`/api/added_cuts?since=${received}`);
+          const json: { total: number; items: number[] } = await res.json();
+          if (!cancelled && json.items.length) {
+            received += json.items.length;
+            setAddedCuts((cur) => cur.concat(json.items));
+          }
+          if (isEnded(res)) return;
+        } catch {
+          // server not reachable, retry on next tick
+        }
+        await sleep(300);
+      }
+    };
+
     // Added constraints: incremental stream, same pattern; payloads can be large so poll less often.
     const pollAddedConstraints = async () => {
       let received = 0;
@@ -205,6 +255,7 @@ function App() {
         void pollSubproblems();
         void pollMicroIters();
         void pollMasterTimes();
+        void pollAddedCuts();
         void pollAddedConstraints();
       });
 
@@ -235,11 +286,23 @@ function App() {
     </button>
   );
 
+  const isView = (v: SubView) => tab === "subproblems" && subView === v;
   const showSidebar =
-    (tab === "micro-iterations" || tab === "constraints" || tab === "heatmap") && subNames.length > 0;
+    (isView("micro-iterations") || isView("constraints") || (isView("heatmap") && heatMode === "per-iteration")) &&
+    subNames.length > 0;
   const heatIters = masterIterations(addedConstraints);
   const currentIter = selectedIter ?? heatIters[heatIters.length - 1] ?? null;
-  const showIterSidebar = tab === "heatmap-iter" && heatIters.length > 0;
+  const showIterSidebar = isView("heatmap") && heatMode === "per-subproblem" && heatIters.length > 0;
+
+  const series = [
+    { label: "UB", data: ub, color: "#e74c3c" },
+    { label: "LB", data: lb, color: "#2e86de" },
+    { label: "Best UB", data: bestUb, color: "#27ae60" },
+  ];
+  const visibleValues = series.filter((x) => !hiddenSeries[x.label]).flatMap((x) => x.data);
+  const yMin = visibleValues.length ? Math.min(...visibleValues) : undefined;
+  const yMax = visibleValues.length ? Math.max(...visibleValues) : undefined;
+  const yPad = yMin !== undefined && yMax !== undefined ? ((yMax - yMin) || Math.abs(yMax) || 1) * 0.05 : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", boxSizing: "border-box", background: "#fff", color: "#222" }}>
@@ -248,7 +311,7 @@ function App() {
         {TABS.map(tabButton)}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           {status && <span style={{ fontSize: 13, color: "#555" }}>{status}</span>}
-          {[["Save", save], ["Load", load]].map(([label, fn]) => (
+          {[["Save", () => setShowSaveDialog(true)], ["Load", load]].map(([label, fn]) => (
             <button
               key={label as string}
               onClick={fn as () => void}
@@ -259,6 +322,42 @@ function App() {
           ))}
         </div>
       </div>
+
+      {showSaveDialog && (
+        <div
+          onClick={() => setShowSaveDialog(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}
+        >
+          <form
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={(e) => {
+              e.preventDefault();
+              setShowSaveDialog(false);
+              save(saveName);
+            }}
+            style={{ background: "#fff", borderRadius: 8, padding: 20, width: 340, boxShadow: "0 8px 30px rgba(0,0,0,0.2)" }}
+          >
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 10 }}>Save as</div>
+            <input
+              autoFocus
+              value={saveName}
+              onChange={(e) => setSaveName(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setShowSaveDialog(false)}
+              placeholder="benders_save"
+              style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", border: "1px solid #ccc", borderRadius: 6, fontSize: 14 }}
+            />
+            <div style={{ fontSize: 12, color: "#777", margin: "6px 0 14px" }}>Saved as &lt;name&gt;.json in the project root.</div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" onClick={() => setShowSaveDialog(false)} style={{ padding: "6px 14px", border: "1px solid #ccc", borderRadius: 6, background: "#fff", fontSize: 13, cursor: "pointer" }}>
+                Cancel
+              </button>
+              <button type="submit" style={{ padding: "6px 14px", border: "1px solid #2e86de", borderRadius: 6, background: "#2e86de", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         {showSidebar && (
@@ -316,7 +415,7 @@ function App() {
         )}
 
         <div style={{ flex: 1, minWidth: 0, boxSizing: "border-box", padding: "24px 32px", display: "flex", flexDirection: "column" }}>
-          <div style={{ display: tab === "ub-lb" ? "block" : "none", flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+          <div style={{ display: tab === "convergence" ? "block" : "none", flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
               <div style={{ position: "relative", width: "100%", height: "100%" }}>
                 <ResetZoomButton onClick={zoom.reset} />
                 <Line
@@ -325,77 +424,167 @@ function App() {
                     responsive: true,
                     maintainAspectRatio: false,
                     animation: false,
-                    plugins: { legend: { position: "top" }, zoom: zoom.plugin },
+                    plugins: {
+                      legend: {
+                        position: "top",
+                        onClick: (_e, item) => {
+                          const label = item.text;
+                          // drop the zoomed y range so the axis refits the remaining curves
+                          zoom.saved.current = { ...zoom.saved.current, y: undefined };
+                          setHiddenSeries((h) => ({ ...h, [label]: !h[label] }));
+                        },
+                      },
+                      zoom: zoom.plugin,
+                    },
                     scales: {
                       x: { title: { display: true, text: "Iteration" }, border: { display: true, color: "#888" }, grid: { color: "#f0f0f0" }, min: zoom.saved.current.x?.min, max: zoom.saved.current.x?.max },
                       y: {
                         title: { display: true, text: "Value" },
                         border: { display: true, color: "#888" },
                         grid: { color: "#f0f0f0" },
-                        beginAtZero: !lb.length,
-                        min: zoom.saved.current.y?.min ?? (lb.length ? Math.min(...lb) * 0.95 : undefined),
-                        max: zoom.saved.current.y?.max ?? (ub.length ? Math.max(...ub) * 1.05 : undefined),
+                        beginAtZero: !visibleValues.length,
+                        min: zoom.saved.current.y?.min ?? (yMin !== undefined ? yMin - yPad : undefined),
+                        max: zoom.saved.current.y?.max ?? (yMax !== undefined ? yMax + yPad : undefined),
                       },
                     },
                   }}
                   data={{
                     labels: iterations,
-                    datasets: [
-                      { label: "UB", data: ub, borderColor: "#e74c3c", borderWidth: 2, pointRadius: 2, fill: false, tension: 0.2 },
-                      { label: "LB", data: lb, borderColor: "#2e86de", borderWidth: 2, pointRadius: 2, fill: false, tension: 0.2 },
-                    ],
+                    datasets: series.map((x) => ({
+                      label: x.label,
+                      data: x.data,
+                      borderColor: x.color,
+                      borderWidth: 2,
+                      pointRadius: 2,
+                      fill: false,
+                      tension: 0.2,
+                      hidden: !!hiddenSeries[x.label],
+                    })),
                   }}
                 />
               </div>
-            </div>
+          </div>
 
-          {tab === "micro-iterations" &&
+          {tab === "subproblems" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              {SUB_VIEWS.map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => setSubView(v.id)}
+                  style={{
+                    padding: "6px 14px",
+                    border: "1px solid #2e86de",
+                    borderRadius: 6,
+                    background: subView === v.id ? "#2e86de" : "#fff",
+                    color: subView === v.id ? "#fff" : "#2e86de",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  {v.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {isView("micro-iterations") &&
             (subNames.length === 0 || !selectedSub ? (
               <div style={{ color: "#777", fontSize: 14 }}>Waiting for subproblems…</div>
             ) : (
               <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
-                <MicroIterChart items={microIters} sub={selectedSub} />
+                <MicroIterChart items={microIters} addedItems={addedConstraints} sub={selectedSub} />
               </div>
             ))}
 
-          {tab === "sub-times" && (
+          {isView("sub-times") && (
             <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
               <SubTimesChart items={microIters} subNames={subNames} />
             </div>
           )}
 
           {tab === "master-times" && (
-            <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
-              <MasterTimesChart items={masterTimes} />
-            </div>
+            <>
+              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                <MasterTimesChart items={masterTimes} />
+              </div>
+              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16, marginTop: 16 }}>
+                <CumulativeCutsChart items={addedCuts} />
+              </div>
+            </>
           )}
 
-          {tab === "constraints" &&
+          {isView("constraints") &&
             (subNames.length === 0 || !selectedSub ? (
               <div style={{ color: "#777", fontSize: 14 }}>Waiting for subproblems…</div>
             ) : (
               <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
-                <ConstraintsChart items={addedConstraints} sub={selectedSub} />
+                <ConstraintsChart items={addedConstraints} microItems={microIters} sub={selectedSub} />
               </div>
             ))}
 
-          {tab === "heatmap" &&
-            (subNames.length === 0 || !selectedSub ? (
-              <div style={{ color: "#777", fontSize: 14 }}>Waiting for subproblems…</div>
-            ) : (
-              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
-                <HeatmapChart items={addedConstraints} sub={selectedSub} />
+          {isView("heatmap") && (
+            <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                {HEAT_MODES.map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={() => setHeatMode(m.id)}
+                    style={{
+                      padding: "6px 14px",
+                      border: "1px solid #2e86de",
+                      borderRadius: 6,
+                      background: heatMode === m.id ? "#2e86de" : "#fff",
+                      color: heatMode === m.id ? "#fff" : "#2e86de",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {m.label}
+                  </button>
+                ))}
               </div>
-            ))}
 
-          {tab === "heatmap-iter" &&
-            (currentIter === null ? (
-              <div style={{ color: "#777", fontSize: 14 }}>Waiting for added constraints…</div>
-            ) : (
-              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
-                <IterationHeatmapChart items={addedConstraints} iter={currentIter} />
+              <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                {(["all", "active"] as const).map((src) => (
+                  <button
+                    key={src}
+                    onClick={() => setHeatSource(src)}
+                    style={{
+                      padding: "4px 12px",
+                      border: "1px solid #2e86de",
+                      borderRadius: 6,
+                      background: heatSource === src ? "#2e86de" : "#fff",
+                      color: heatSource === src ? "#fff" : "#2e86de",
+                      fontSize: 13,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {src === "all" ? "All" : "Active"}
+                  </button>
+                ))}
               </div>
-            ))}
+
+              {heatMode === "per-iteration" &&
+                (subNames.length === 0 || !selectedSub ? (
+                  <div style={{ color: "#777", fontSize: 14 }}>Waiting for subproblems…</div>
+                ) : (
+                  <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                    <HeatmapChart items={addedConstraints} sub={selectedSub} source={heatSource} />
+                  </div>
+                ))}
+
+              {heatMode === "per-subproblem" &&
+                (currentIter === null ? (
+                  <div style={{ color: "#777", fontSize: 14 }}>Waiting for added constraints…</div>
+                ) : (
+                  <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                    <IterationHeatmapChart items={addedConstraints} iter={currentIter} source={heatSource} />
+                  </div>
+                ))}
+            </>
+          )}
         </div>
       </div>
     </div>

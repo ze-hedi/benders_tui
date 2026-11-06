@@ -20,7 +20,7 @@ app.post("/end", (_req, res) => {
   ended = true;
   console.log("[POST end] algorithm finished, frontend polling will stop");
   // The run is complete: save automatically.
-  const err = saveSnapshot();
+  const err = saveSnapshot(savePath(DEFAULT_SAVE_NAME)!);
   if (err) console.error(`[POST end] auto-save failed: ${err}`);
   res.json({ ok: true, saved: !err });
 });
@@ -135,6 +135,24 @@ app.post("/master_times", (req, res) => {
   res.json({ ok: true, points: masterTimes.length });
 });
 
+// Cuts added to the master at each iteration (one entry per POST, in arrival order).
+const addedCuts: number[] = [];
+
+app.post("/added_cuts", (req, res) => {
+  const n = req.body?.n_cuts_added;
+  if (!Number.isInteger(n) || n < 0) {
+    return res.status(400).json({ error: "n_cuts_added (non-negative int) required" });
+  }
+  addedCuts.push(n);
+  console.log(`[POST added_cuts] iter=${addedCuts.length} n=${n}`);
+  res.json({ ok: true, points: addedCuts.length });
+});
+
+app.get("/api/added_cuts", (req, res) => {
+  const since = Math.max(0, Number.parseInt(String(req.query.since ?? "0"), 10) || 0);
+  res.json({ total: addedCuts.length, items: addedCuts.slice(since) });
+});
+
 app.get("/api/master_times", (req, res) => {
   const since = Math.max(0, Number.parseInt(String(req.query.since ?? "0"), 10) || 0);
   res.json({ total: masterTimes.length, items: masterTimes.slice(since) });
@@ -148,7 +166,8 @@ interface AddedConstraints {
   sub_name: string;
   num_master_iter: number;
   num_micro_iter: number;
-  constraints: { name: string; is_N: boolean }[];
+  constraints: { name: string; is_N: boolean; is_inc: boolean }[];
+  active_constraints: string[]; // names of the saturated constraints at this micro-iteration
 }
 const addedConstraints: AddedConstraints[] = [];
 
@@ -159,17 +178,20 @@ app.post("/added_constraints", (req, res) => {
     typeof b.sub_name !== "string" ||
     ints.some((v) => !Number.isInteger(v)) ||
     !Array.isArray(b.constraints) ||
+    !Array.isArray(b.active_constraints) ||
+    b.active_constraints.some((n: unknown) => typeof n !== "string") ||
     b.constraints.some(
       (c: unknown) =>
         typeof c !== "object" ||
         c === null ||
         typeof (c as { name?: unknown }).name !== "string" ||
-        typeof (c as { is_N?: unknown }).is_N !== "boolean",
+        typeof (c as { is_N?: unknown }).is_N !== "boolean" ||
+        typeof (c as { is_inc?: unknown }).is_inc !== "boolean",
     )
   ) {
     return res.status(400).json({
       error:
-        "rank, num_master_iter, num_micro_iter (int), sub_name (string), constraints ({ name: string, is_N: boolean }[]) required",
+        "rank, num_master_iter, num_micro_iter (int), sub_name (string), constraints ({ name: string, is_N: boolean, is_inc: boolean }[]), active_constraints (string[]) required",
     });
   }
   addedConstraints.push({
@@ -177,7 +199,12 @@ app.post("/added_constraints", (req, res) => {
     sub_name: b.sub_name,
     num_master_iter: b.num_master_iter,
     num_micro_iter: b.num_micro_iter,
-    constraints: b.constraints.map((c: { name: string; is_N: boolean }) => ({ name: c.name, is_N: c.is_N })),
+    constraints: b.constraints.map((c: { name: string; is_N: boolean; is_inc: boolean }) => ({
+      name: c.name,
+      is_N: c.is_N,
+      is_inc: c.is_inc,
+    })),
+    active_constraints: [...b.active_constraints],
   });
   console.log(
     `[POST added_constraints] ${b.sub_name} master=${b.num_master_iter} micro=${b.num_micro_iter} n=${b.constraints.length}`,
@@ -226,37 +253,50 @@ app.post("/api/reset", (_req, res) => {
   data.best_ub.length = 0;
   microIters.length = 0;
   masterTimes.length = 0;
+  addedCuts.length = 0;
   addedConstraints.length = 0;
   res.json({ ok: true });
 });
 
 // Save/load: snapshot of everything above, stored in the repo root so it can be committed/shared.
-const SAVE_FILE = path.resolve(__dirname, "..", "benders_save.json");
+const SAVE_DIR = path.resolve(__dirname, "..");
+const DEFAULT_SAVE_NAME = "benders_save";
+
+// Maps a user-supplied name to a file in SAVE_DIR; null if the name is not a plain file name.
+function savePath(name: unknown): string | null {
+  const base = (typeof name === "string" && name.trim() ? name.trim() : DEFAULT_SAVE_NAME).replace(/\.json$/i, "");
+  if (!/^[\w. -]+$/.test(base) || base.startsWith(".")) return null;
+  return path.join(SAVE_DIR, `${base}.json`);
+}
 
 // Returns an error message, or null on success.
-function saveSnapshot(): string | null {
-  const snapshot = { data, subproblemNames, microIters, masterTimes, addedConstraints };
+function saveSnapshot(file: string): string | null {
+  const snapshot = { data, subproblemNames, microIters, masterTimes, addedConstraints, addedCuts };
   try {
-    fs.writeFileSync(SAVE_FILE, JSON.stringify(snapshot));
+    fs.writeFileSync(file, JSON.stringify(snapshot));
   } catch (e) {
     return `could not write save file: ${(e as Error).message}`;
   }
-  console.log(`[save] ${SAVE_FILE}`);
+  console.log(`[save] ${file}`);
   return null;
 }
 
-app.post("/api/save", (_req, res) => {
-  const err = saveSnapshot();
+app.post("/api/save", (req, res) => {
+  const file = savePath(req.body?.name);
+  if (!file) return res.status(400).json({ error: "invalid file name (letters, digits, space, _ - . only)" });
+  const err = saveSnapshot(file);
   if (err) return res.status(500).json({ error: err });
-  res.json({ ok: true, file: SAVE_FILE, points: data.iteration.length });
+  res.json({ ok: true, file, points: data.iteration.length });
 });
 
 // Replaces the server state with the saved snapshot and flags the run as ended so a
 // (re)connecting frontend does not wait for more data. Responds with the snapshot.
-app.post("/api/load", (_req, res) => {
+app.post("/api/load", (req, res) => {
+  const file = savePath(req.body?.name);
+  if (!file) return res.status(400).json({ error: "invalid file name" });
   let snap: any;
   try {
-    snap = JSON.parse(fs.readFileSync(SAVE_FILE, "utf8"));
+    snap = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (e) {
     const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
     return res.status(missing ? 404 : 500).json({
@@ -271,10 +311,11 @@ app.post("/api/load", (_req, res) => {
   microIters.splice(0, microIters.length, ...(snap.microIters ?? []));
   masterTimes.splice(0, masterTimes.length, ...(snap.masterTimes ?? []));
   addedConstraints.splice(0, addedConstraints.length, ...(snap.addedConstraints ?? []));
+  addedCuts.splice(0, addedCuts.length, ...(snap.addedCuts ?? []));
   ended = true;
   res.setHeader("X-Ended", "true");
-  console.log(`[POST load] ${SAVE_FILE} (${data.iteration.length} points)`);
-  res.json({ data, subproblemNames, microIters, masterTimes, addedConstraints });
+  console.log(`[POST load] ${file} (${data.iteration.length} points)`);
+  res.json({ data, subproblemNames, microIters, masterTimes, addedConstraints, addedCuts });
 });
 
 app.listen(3123, () => console.log("Server running on http://localhost:3123"));

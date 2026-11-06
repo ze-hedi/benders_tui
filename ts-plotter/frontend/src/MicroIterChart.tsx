@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Bar } from "react-chartjs-2";
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Tooltip, Legend } from "chart.js";
 
+import type { AddedConstraints } from "./ConstraintsChart";
 import { ResetZoomButton, useChartZoom } from "./zoom";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
@@ -22,7 +23,15 @@ export interface MicroIter {
 
 const colorFor = (micro: number) => `hsl(${(micro * 137.508) % 360} 65% 52%)`;
 
-export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub: string }) {
+export default function MicroIterChart({
+  items,
+  addedItems,
+  sub,
+}: {
+  items: MicroIter[];
+  addedItems: AddedConstraints[];
+  sub: string;
+}) {
   const { chartRef, saved, plugin, reset } = useChartZoom();
   const [detail, setDetail] = useState(false);
   const [selectedMaster, setSelectedMaster] = useState<number | null>(null);
@@ -49,10 +58,18 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
   const sx = saved.current.x;
   const sy = saved.current.y;
 
-  // N / NK detail: one pair of bars per micro-iteration of the chosen Benders iteration.
+  // Saturation detail: one bar per micro-iteration of the chosen Benders iteration.
   // Derived from `items` on every render, so it updates as new micro-iterations arrive.
-  const detailMicros =
-    selectedMaster === null ? [] : micros.filter((micro) => lookup(selectedMaster, micro));
+  const detailMicros = micros.filter((micro) => lookup(selectedMaster ?? -1, micro));
+  const pct = (num: number, den: number) => (den > 0 ? (100 * num) / den : null);
+  // Number of added constraints with is_inc = false at (selectedMaster, micro), from /added_constraints.
+  // The saturation measured at micro k concerns the constraints added at micro k-1, so look up k-1.
+  const nbNotInc = new Map<number, number>();
+  for (const a of addedItems) {
+    if (a.sub_name === sub && a.num_master_iter === selectedMaster) {
+      nbNotInc.set(a.num_micro_iter, a.constraints.filter((c) => !c.is_inc).length);
+    }
+  }
 
   const toolbar = (
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
@@ -68,7 +85,7 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
           cursor: "pointer",
         }}
       >
-        {detail ? "Back to time chart" : "N / NK constraints"}
+        {detail ? "Back to micro-iterations chart" : "Saturated constraint rate"}
       </button>
       {detail && (
         <select
@@ -93,7 +110,7 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
         {toolbar}
         <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
           {selectedMaster === null ? (
-            <div style={{ color: "#777", fontSize: 14 }}>Select an iteration to see its N / NK constraints.</div>
+            <div style={{ color: "#777", fontSize: 14 }}>Select an iteration to see its saturated constraint rates.</div>
           ) : (
             <Bar
               options={{
@@ -103,24 +120,40 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
                 plugins: {
                   legend: { position: "top" },
                   title: { display: true, text: `${sub} · iteration ${selectedMaster}` },
+                  tooltip: {
+                    callbacks: {
+                      label: (ctx) => {
+                        const micro = detailMicros[ctx.dataIndex];
+                        const it = lookup(selectedMaster, micro);
+                        if (!it) return "";
+                        const den = ctx.datasetIndex === 0 ? it.n_all_constraints : nbNotInc.get(micro - 1) ?? 0;
+                        return `${ctx.dataset.label}: ${it.n_saturated_constraints} / ${den}`;
+                      },
+                    },
+                  },
                 },
                 scales: {
                   x: { title: { display: true, text: "Micro-iteration" }, grid: { display: false } },
-                  y: { title: { display: true, text: "Added constraints" }, beginAtZero: true, ticks: { precision: 0 }, grid: { color: "#f0f0f0" } },
+                  y: { title: { display: true, text: "Saturated constraint rate (%)" }, beginAtZero: true, suggestedMax: 100, grid: { color: "#f0f0f0" } },
                 },
               }}
               data={{
                 labels: detailMicros,
                 datasets: [
                   {
-                    label: "N",
-                    backgroundColor: "#2e86de",
-                    data: detailMicros.map((micro) => lookup(selectedMaster, micro)!.n_added_constraints_N),
+                    label: "Saturated / all constraints",
+                    backgroundColor: "#16a085",
+                    data: detailMicros.map((micro) => {
+                      const it = lookup(selectedMaster, micro)!;
+                      return pct(it.n_saturated_constraints, it.n_all_constraints);
+                    }),
                   },
                   {
-                    label: "NK",
-                    backgroundColor: "#e67e22",
-                    data: detailMicros.map((micro) => lookup(selectedMaster, micro)!.n_added_constraints_NK),
+                    label: "Saturated / added constraints (is_inc = false)",
+                    backgroundColor: "#8e44ad",
+                    data: detailMicros.map((micro) =>
+                      pct(lookup(selectedMaster, micro)!.n_saturated_constraints, nbNotInc.get(micro - 1) ?? 0),
+                    ),
                   },
                 ],
               }}
@@ -153,16 +186,11 @@ export default function MicroIterChart({ items, sub }: { items: MicroIter[]; sub
                 label: (ctx) => {
                   const it = lookup(masters[ctx.dataIndex], micros[ctx.datasetIndex]);
                   if (!it) return "";
-                  const lines = [
+                  return [
                     `elapsed_time: ${it.elapsed_time}`,
                     `solving_time: ${it.solving_time}`,
                     `added constraints: ${it.nb_added_constraints}`,
                   ];
-                  if (it.n_all_constraints > 0) {
-                    const rate = (100 * it.n_saturated_constraints) / it.n_all_constraints;
-                    lines.push(`saturated constraint rate: ${rate.toFixed(1)}%`);
-                  }
-                  return lines;
                 },
               },
             },

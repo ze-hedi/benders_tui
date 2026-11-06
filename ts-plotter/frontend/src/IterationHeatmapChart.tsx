@@ -5,27 +5,26 @@ import type { AddedConstraints } from "./ConstraintsChart";
 // DECISION: for one master iteration, cell (a, b) = Jaccard similarity |Ca ∩ Cb| / |Ca ∪ Cb| of the
 // sets of constraints added by subproblems a and b during that iteration (union over micro-iterations).
 // Symmetric, diagonal = 100%. Mirror of HeatmapChart (which compares iterations for one subproblem).
-const CELL = 34;
-const LABEL = 120;
+const CELL = 56;
+const LABEL = 150;
 
-// White (0%) -> blue (100%).
-const colorFor = (pct: number) => `hsl(213 ${20 + pct * 0.7}% ${97 - pct * 0.5}%)`;
+import { heatColor as colorFor, heatTextColor, constraintSet, type HeatSource } from "./heatmapColor";
 
 export function masterIterations(items: AddedConstraints[]): number[] {
   return [...new Set(items.map((it) => it.num_master_iter))].sort((a, b) => a - b);
 }
 
-export default function IterationHeatmapChart({ items, iter }: { items: AddedConstraints[]; iter: number }) {
+export default function IterationHeatmapChart({ items, iter, source }: { items: AddedConstraints[]; iter: number; source: HeatSource }) {
   const { subs, pct, sizes } = useMemo(() => {
-    const bySub = new Map<string, Set<string>>();
+    const bySub = new Map<string, AddedConstraints[]>();
     for (const it of items) {
       if (it.num_master_iter !== iter) continue;
-      let set = bySub.get(it.sub_name);
-      if (!set) bySub.set(it.sub_name, (set = new Set()));
-      for (const c of it.constraints) set.add(c.name);
+      const group = bySub.get(it.sub_name);
+      if (group) group.push(it);
+      else bySub.set(it.sub_name, [it]);
     }
     const subs = [...bySub.keys()].sort();
-    const sets = subs.map((s) => bySub.get(s)!);
+    const sets = subs.map((s) => constraintSet(bySub.get(s)!, source));
     const pct = sets.map((a, i) =>
       sets.map((b, j) => {
         if (i === j) return 100;
@@ -37,7 +36,7 @@ export default function IterationHeatmapChart({ items, iter }: { items: AddedCon
       }),
     );
     return { subs, pct, sizes: sets.map((s) => s.size) };
-  }, [items, iter]);
+  }, [items, iter, source]);
 
   if (!subs.length) {
     return <div style={{ color: "#777", fontSize: 14 }}>No added constraints received for iteration {iter} yet…</div>;
@@ -47,7 +46,7 @@ export default function IterationHeatmapChart({ items, iter }: { items: AddedCon
     <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
       <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Iteration {iter}</div>
       <div style={{ color: "#777", fontSize: 12, marginBottom: 12 }}>
-        % of common added constraints between subproblems (shared / total distinct)
+        % of common {source === "all" ? "added" : "active (final micro-iteration)"} constraints between subproblems (shared / total distinct)
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
         <div
@@ -62,7 +61,7 @@ export default function IterationHeatmapChart({ items, iter }: { items: AddedCon
             <div
               key={`c${s}`}
               title={s}
-              style={{ fontSize: 11, textAlign: "center", color: "#555", paddingBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              style={{ fontSize: 13, textAlign: "center", color: "#555", paddingBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
             >
               {s}
             </div>
@@ -81,7 +80,7 @@ function Row({ label, values, subs, sizes, i, iter }: { label: string; values: n
     <>
       <div
         title={label}
-        style={{ fontSize: 11, color: "#555", display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}
+        style={{ fontSize: 13, color: "#555", display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}
       >
         {label}
       </div>
@@ -94,11 +93,11 @@ function Row({ label, values, subs, sizes, i, iter }: { label: string; values: n
             background: colorFor(v),
             border: "1px solid #fff",
             boxSizing: "border-box",
-            fontSize: 10,
+            fontSize: 13,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            color: v > 60 ? "#fff" : "#333",
+            color: heatTextColor(v),
           }}
         >
           {Math.round(v)}
