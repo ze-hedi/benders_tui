@@ -14,6 +14,7 @@ import {
 import MicroIterChart, { type MicroIter } from "./MicroIterChart";
 import ConstraintsChart, { type AddedConstraints } from "./ConstraintsChart";
 import HeatmapChart from "./HeatmapChart";
+import IterationHeatmapChart, { masterIterations } from "./IterationHeatmapChart";
 import SubTimesChart from "./SubTimesChart";
 import MasterTimesChart, { type MasterTime } from "./MasterTimesChart";
 import { ResetZoomButton, useChartZoom } from "./zoom";
@@ -27,14 +28,15 @@ interface PlotData {
   best_ub: number[];
 }
 
-type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times" | "constraints" | "heatmap";
+type Tab = "ub-lb" | "micro-iterations" | "sub-times" | "master-times" | "constraints" | "heatmap" | "heatmap-iter";
 const TABS: { id: Tab; label: string }[] = [
   { id: "ub-lb", label: "UB-LB" },
   { id: "micro-iterations", label: "Micro-iterations" },
   { id: "sub-times", label: "Subproblem times" },
   { id: "master-times", label: "Master times" },
   { id: "constraints", label: "Constraints" },
-  { id: "heatmap", label: "Heatmap" },
+  { id: "heatmap", label: "Common per iteration" },
+  { id: "heatmap-iter", label: "Common per subproblem" },
 ];
 
 function App() {
@@ -42,6 +44,8 @@ function App() {
   const [tab, setTab] = useState<Tab>("ub-lb");
   const [subNames, setSubNames] = useState<string[]>([]);
   const [selectedSub, setSelectedSub] = useState<string | null>(null);
+  // null = follow the latest master iteration as new ones arrive
+  const [selectedIter, setSelectedIter] = useState<number | null>(null);
   const zoom = useChartZoom();
   const [microIters, setMicroIters] = useState<MicroIter[]>([]);
   const [masterTimes, setMasterTimes] = useState<MasterTime[]>([]);
@@ -233,6 +237,9 @@ function App() {
 
   const showSidebar =
     (tab === "micro-iterations" || tab === "constraints" || tab === "heatmap") && subNames.length > 0;
+  const heatIters = masterIterations(addedConstraints);
+  const currentIter = selectedIter ?? heatIters[heatIters.length - 1] ?? null;
+  const showIterSidebar = tab === "heatmap-iter" && heatIters.length > 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", boxSizing: "border-box", background: "#fff", color: "#222" }}>
@@ -278,6 +285,31 @@ function App() {
                 }}
               >
                 {name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {showIterSidebar && (
+          <div style={{ width: 220, flexShrink: 0, overflowY: "auto", borderRight: "1px solid #e5e7eb", padding: "12px 0" }}>
+            {[...heatIters].reverse().map((it) => (
+              <button
+                key={it}
+                onClick={() => setSelectedIter(it === heatIters[heatIters.length - 1] ? null : it)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "8px 20px",
+                  border: "none",
+                  borderLeft: currentIter === it ? "3px solid #2e86de" : "3px solid transparent",
+                  background: currentIter === it ? "#eef5fd" : "transparent",
+                  color: currentIter === it ? "#2e86de" : "#333",
+                  textAlign: "left",
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                Iteration {it}
               </button>
             ))}
           </div>
@@ -353,6 +385,15 @@ function App() {
             ) : (
               <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
                 <HeatmapChart items={addedConstraints} sub={selectedSub} />
+              </div>
+            ))}
+
+          {tab === "heatmap-iter" &&
+            (currentIter === null ? (
+              <div style={{ color: "#777", fontSize: 14 }}>Waiting for added constraints…</div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                <IterationHeatmapChart items={addedConstraints} iter={currentIter} />
               </div>
             ))}
         </div>
