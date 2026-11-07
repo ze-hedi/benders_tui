@@ -1,10 +1,10 @@
-import { useMemo } from "react";
-import { Line } from "react-chartjs-2";
-import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend } from "chart.js";
+import { useMemo, useState } from "react";
+import { Bar, Line } from "react-chartjs-2";
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Tooltip, Legend } from "chart.js";
 import type { MicroIter } from "./MicroIterChart";
 import { ResetZoomButton, useChartZoom } from "./zoom";
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend);
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Tooltip, Legend);
 
 const colorFor = (i: number) => `hsl(${(i * 137.508) % 360} 65% 48%)`;
 
@@ -12,6 +12,7 @@ const colorFor = (i: number) => `hsl(${(i * 137.508) % 360} 65% 48%)`;
 // elapsed_time + solving_time. Derived from the micro-iteration stream, no extra fetch.
 export default function SubTimesChart({ items, subNames }: { items: MicroIter[]; subNames: string[] }) {
   const { chartRef, saved, plugin, reset } = useChartZoom();
+  const [cumulated, setCumulated] = useState(false);
 
   const { masters, totals, names } = useMemo(() => {
     const totals = new Map<string, Map<number, number>>();
@@ -34,8 +35,54 @@ export default function SubTimesChart({ items, subNames }: { items: MicroIter[];
   const sx = saved.current.x;
   const sy = saved.current.y;
 
+  const toolbar = (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+      <button
+        onClick={() => setCumulated((c) => !c)}
+        style={{
+          padding: "4px 12px",
+          border: "1px solid #2e86de",
+          borderRadius: 6,
+          background: cumulated ? "#2e86de" : "#fff",
+          color: cumulated ? "#fff" : "#2e86de",
+          fontSize: 13,
+          cursor: "pointer",
+        }}
+      >
+        {cumulated ? "Back to per-subproblem times" : "Cumulated times"}
+      </button>
+    </div>
+  );
+
+  if (cumulated) {
+    // Sum over all subproblems of each Benders iteration's total time.
+    const sums = masters.map((m) => names.reduce((acc, n) => acc + (totals.get(n)?.get(m) ?? 0), 0));
+    return (
+      <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
+        {toolbar}
+        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          <Bar
+            options={{
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: false,
+              plugins: { legend: { display: false }, title: { display: true, text: "Cumulated subproblem time per iteration" } },
+              scales: {
+                x: { title: { display: true, text: "Benders iteration" }, grid: { display: false } },
+                y: { title: { display: true, text: "Sum of subproblem times" }, beginAtZero: true, grid: { color: "#f0f0f0" } },
+              },
+            }}
+            data={{ labels: masters, datasets: [{ label: "Cumulated time", backgroundColor: "#2e86de", data: sums }] }}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+    <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
+      {toolbar}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
       <ResetZoomButton onClick={reset} />
       <Line
         ref={chartRef as never}
@@ -64,6 +111,7 @@ export default function SubTimesChart({ items, subNames }: { items: MicroIter[];
           })),
         }}
       />
+      </div>
     </div>
   );
 }

@@ -166,7 +166,7 @@ interface AddedConstraints {
   sub_name: string;
   num_master_iter: number;
   num_micro_iter: number;
-  constraints: { name: string; is_N: boolean; is_inc: boolean }[];
+  constraints: { name: string; is_N: boolean; is_inc: boolean; n_constraints: number }[];
   active_constraints: string[]; // names of the saturated constraints at this micro-iteration
 }
 const addedConstraints: AddedConstraints[] = [];
@@ -186,12 +186,13 @@ app.post("/added_constraints", (req, res) => {
         c === null ||
         typeof (c as { name?: unknown }).name !== "string" ||
         typeof (c as { is_N?: unknown }).is_N !== "boolean" ||
-        typeof (c as { is_inc?: unknown }).is_inc !== "boolean",
+        typeof (c as { is_inc?: unknown }).is_inc !== "boolean" ||
+        !Number.isInteger((c as { n_constraints?: unknown }).n_constraints),
     )
   ) {
     return res.status(400).json({
       error:
-        "rank, num_master_iter, num_micro_iter (int), sub_name (string), constraints ({ name: string, is_N: boolean, is_inc: boolean }[]), active_constraints (string[]) required",
+        "rank, num_master_iter, num_micro_iter (int), sub_name (string), constraints ({ name: string, is_N: boolean, is_inc: boolean, n_constraints: int }[]), active_constraints (string[]) required",
     });
   }
   addedConstraints.push({
@@ -199,10 +200,11 @@ app.post("/added_constraints", (req, res) => {
     sub_name: b.sub_name,
     num_master_iter: b.num_master_iter,
     num_micro_iter: b.num_micro_iter,
-    constraints: b.constraints.map((c: { name: string; is_N: boolean; is_inc: boolean }) => ({
+    constraints: b.constraints.map((c: { name: string; is_N: boolean; is_inc: boolean; n_constraints: number }) => ({
       name: c.name,
       is_N: c.is_N,
       is_inc: c.is_inc,
+      n_constraints: c.n_constraints,
     })),
     active_constraints: [...b.active_constraints],
   });
@@ -307,6 +309,23 @@ function saveSnapshot(file: string): string | null {
   return null;
 }
 
+// Lists the snapshots in SAVE_DIR (newest first) for the Load page.
+app.get("/api/saves", (_req, res) => {
+  try {
+    const saves = fs
+      .readdirSync(SAVE_DIR)
+      .filter((f) => f.endsWith(".json") && savePath(f))
+      .map((f) => {
+        const st = fs.statSync(path.join(SAVE_DIR, f));
+        return { name: f.replace(/\.json$/, ""), modified: st.mtimeMs, size: st.size };
+      })
+      .sort((a, b) => b.modified - a.modified);
+    res.json(saves);
+  } catch (e) {
+    res.status(500).json({ error: `could not list save folder: ${(e as Error).message}` });
+  }
+});
+
 app.post("/api/save", (req, res) => {
   const file = savePath(req.body?.name);
   if (!file) return res.status(400).json({ error: "invalid file name (letters, digits, space, _ - . only)" });
@@ -328,6 +347,9 @@ app.post("/api/load", (req, res) => {
     return res.status(missing ? 404 : 500).json({
       error: missing ? "no save file found, click Save first" : `could not read save file: ${(e as Error).message}`,
     });
+  }
+  if (!Array.isArray(snap?.data?.iteration)) {
+    return res.status(400).json({ error: "not a Benders save file" });
   }
   data.iteration = snap.data?.iteration ?? [];
   data.lb = snap.data?.lb ?? [];

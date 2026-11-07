@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import type { AddedConstraints } from "./ConstraintsChart";
+import HeatScale from "./HeatScale";
 
 // DECISION: cell (i, j) = Jaccard similarity |Ci ∩ Cj| / |Ci ∪ Cj| of the sets of constraints
 // added during master iterations i and j (union over all micro-iterations). Symmetric, diagonal = 100%.
@@ -43,7 +44,7 @@ export default function HeatmapChart({ items, sub, source }: { items: AddedConst
       <div style={{ color: "#777", fontSize: 12, marginBottom: 12 }}>
         % of common {source === "all" ? "added" : "active (final micro-iteration)"} constraints between master iterations (shared / total distinct)
       </div>
-      <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto", display: "flex", alignItems: "flex-start" }}>
         <div
           style={{
             display: "grid",
@@ -61,6 +62,7 @@ export default function HeatmapChart({ items, sub, source }: { items: AddedConst
             <Row key={mi} label={mi} values={pct[i]} masters={masters} sizes={sizes} i={i} />
           ))}
         </div>
+        <HeatScale />
       </div>
     </div>
   );

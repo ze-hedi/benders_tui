@@ -50,7 +50,8 @@ const HEAT_MODES: { id: HeatMode; label: string }[] = [
 ];
 
 // saveName: file chosen on the landing page; Save and Load use it, and the server auto-saves to it.
-function App({ saveName }: { saveName: string }) {
+// loadName: when set, the app opens on that saved snapshot instead of following a live run.
+function App({ saveName, fromNewRun, loadName }: { saveName: string; fromNewRun: boolean; loadName?: string }) {
   const [data, setData] = useState<PlotData>({ iteration: [], lb: [], ub: [], best_ub: [] });
   const [tab, setTab] = useState<Tab>("convergence");
   const [subNames, setSubNames] = useState<string[]>([]);
@@ -86,12 +87,12 @@ function App({ saveName }: { saveName: string }) {
     }
   };
 
-  const load = async () => {
+  const load = async (name: string = saveName) => {
     try {
       const res = await fetch("/api/load", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: saveName }),
+        body: JSON.stringify({ name }),
       });
       const json = await res.json();
       if (!res.ok) return setStatus(json.error ?? "Load failed");
@@ -245,13 +246,20 @@ function App({ saveName }: { saveName: string }) {
     // Page load/refresh starts a fresh graph: clear server-side data, then start all
     // streams independently (none waits for another).
     // A reload triggered by a new run (POST /set) must keep the server state it just received.
-    const fromNewRun = sessionStorage.getItem("skipReset") === "1";
-    sessionStorage.removeItem("skipReset");
     const events = new EventSource("/api/events");
     events.addEventListener("new-run", () => {
       sessionStorage.setItem("skipReset", "1");
       window.location.reload();
     });
+
+    if (loadName) {
+      // Opened from the Load page: show the snapshot, no live streams.
+      void load(loadName);
+      return () => {
+        cancelled = true;
+        events.close();
+      };
+    }
 
     (fromNewRun ? Promise.resolve() : fetch("/api/reset", { method: "POST" }))
       .catch(() => {})
@@ -321,7 +329,7 @@ function App({ saveName }: { saveName: string }) {
           {[["Save", save], ["Load", load]].map(([label, fn]) => (
             <button
               key={label as string}
-              onClick={fn as () => void}
+              onClick={() => (fn as () => void)()}
               style={{ padding: "6px 14px", border: "1px solid #2e86de", borderRadius: 6, background: "#fff", color: "#2e86de", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
             >
               {label as string}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import App from "./App";
 
@@ -15,11 +15,22 @@ const card = {
   textAlign: "center" as const,
 };
 
+// Read and consume the flag once per page load, at module level: StrictMode runs effects and
+// initializers twice, so consuming it inside them would lose it on the second run.
+const RESUMED_NAME = sessionStorage.getItem("skipReset") === "1" ? sessionStorage.getItem("saveName") : null;
+sessionStorage.removeItem("skipReset");
+
+interface SaveFile {
+  name: string;
+  modified: number;
+  size: number;
+}
+
 // Entry page: "Stream" mounts the live app (its polling starts on mount, so it must not be
-// mounted before the choice); "Load" will rebuild the graphs from the Benders log files (TODO).
+// mounted before the choice); "Load" lists the saved runs and opens the chosen one.
 export default function Root() {
   // A reload caused by a new run (POST /set, see App) must come back to the stream, same save name.
-  const resumed = sessionStorage.getItem("skipReset") === "1" ? sessionStorage.getItem("saveName") : null;
+  const resumed = RESUMED_NAME;
   const [mode, setMode] = useState<Mode>(resumed !== null ? "stream" : "choose");
   const [saveName, setSaveName] = useState(resumed ?? "");
   const [askName, setAskName] = useState(false);
@@ -43,15 +54,50 @@ export default function Root() {
     }
   };
 
-  if (mode === "stream") return <App saveName={saveName} />;
+  const [saves, setSaves] = useState<SaveFile[] | null>(null);
+  const [loadName, setLoadName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mode !== "load") return;
+    setSaves(null);
+    setError(null);
+    fetch("/api/saves")
+      .then(async (res) => {
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error);
+        setSaves(json);
+      })
+      .catch((e) => {
+        setSaves([]);
+        setError(e.message || "Server not reachable");
+      });
+  }, [mode]);
+
+  if (mode === "stream") return <App saveName={saveName} fromNewRun={resumed !== null} />;
+  if (mode === "load" && loadName) return <App saveName={loadName} fromNewRun={false} loadName={loadName} />;
 
   if (mode === "load") {
     return (
-      <div style={{ padding: 32, color: "#222" }}>
+      <div style={{ maxWidth: 520, margin: "0 auto", padding: 32, color: "#222" }}>
         <button onClick={() => setMode("choose")} style={{ marginBottom: 16, cursor: "pointer" }}>
           ← Back
         </button>
-        <div style={{ color: "#777", fontSize: 14 }}>Loading from log files is not implemented yet.</div>
+        <h2 style={{ margin: "0 0 16px", fontSize: 20, fontWeight: 600 }}>Load a saved run</h2>
+        {error && <div style={{ color: "#c0392b", fontSize: 14 }}>{error}</div>}
+        {saves === null && <div style={{ color: "#777", fontSize: 14 }}>Loading…</div>}
+        {saves?.length === 0 && !error && <div style={{ color: "#777", fontSize: 14 }}>No saved runs found.</div>}
+        {saves?.map((s) => (
+          <button
+            key={s.name}
+            onClick={() => setLoadName(s.name)}
+            style={{ display: "flex", justifyContent: "space-between", width: "100%", padding: "10px 14px", marginBottom: 8, border: "1px solid #e5e7eb", borderRadius: 6, background: "#fff", color: "#2e86de", fontSize: 14, cursor: "pointer", textAlign: "left" }}
+          >
+            <span style={{ fontWeight: 600 }}>{s.name}</span>
+            <span style={{ color: "#777", fontSize: 12 }}>
+              {new Date(s.modified).toLocaleString()} · {(s.size / 1024).toFixed(0)} KB
+            </span>
+          </button>
+        ))}
       </div>
     );
   }
@@ -66,7 +112,7 @@ export default function Root() {
         </button>
         <button style={card} onClick={() => setMode("load")}>
           <div style={{ fontSize: 18, fontWeight: 600 }}>Load</div>
-          <div style={{ fontSize: 13, color: "#777", marginTop: 8 }}>Rebuild graphs from log files</div>
+          <div style={{ fontSize: 13, color: "#777", marginTop: 8 }}>Open a saved run</div>
         </button>
       </div>
       {askName && (

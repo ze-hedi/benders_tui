@@ -13,7 +13,7 @@ export interface AddedConstraints {
   sub_name: string;
   num_master_iter: number;
   num_micro_iter: number;
-  constraints: { name: string; is_N: boolean; is_inc: boolean }[];
+  constraints: { name: string; is_N: boolean; is_inc: boolean; n_constraints: number }[];
   active_constraints?: string[]; // saturated constraint names (absent in older saves)
 }
 
@@ -64,6 +64,17 @@ export default function ConstraintsChart({
   }
   const detailMicros = [...nkCell.keys()].sort((a, b) => a - b);
 
+  // Overview (no iteration selected): N and NK summed over the micro-iterations of each Benders iteration.
+  const totals = new Map<number, { n: number; nk: number }>();
+  for (const it of microItems) {
+    if (it.sub_name !== sub) continue;
+    const t = totals.get(it.num_master_iter) ?? { n: 0, nk: 0 };
+    t.n += it.n_added_constraints_N;
+    t.nk += it.n_added_constraints_NK;
+    totals.set(it.num_master_iter, t);
+  }
+  const totalMasters = [...totals.keys()].sort((a, b) => a - b);
+
   const toolbar = (
     <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
       <button
@@ -103,7 +114,28 @@ export default function ConstraintsChart({
         {toolbar}
         <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
           {selectedMaster === null ? (
-            <div style={{ color: "#777", fontSize: 14 }}>Select an iteration to see its N / NK constraints.</div>
+            <Bar
+              options={{
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                plugins: {
+                  legend: { position: "top" },
+                  title: { display: true, text: `${sub} · N / NK per iteration` },
+                },
+                scales: {
+                  x: { stacked: true, title: { display: true, text: "Benders iteration" }, grid: { display: false } },
+                  y: { stacked: true, title: { display: true, text: "Added constraints" }, beginAtZero: true, ticks: { precision: 0 }, grid: { color: "#f0f0f0" } },
+                },
+              }}
+              data={{
+                labels: totalMasters,
+                datasets: [
+                  { label: "N", backgroundColor: "#2e86de", data: totalMasters.map((m) => totals.get(m)!.n) },
+                  { label: "NK", backgroundColor: "#e67e22", data: totalMasters.map((m) => totals.get(m)!.nk) },
+                ],
+              }}
+            />
           ) : (
             <Bar
               options={{

@@ -62,12 +62,13 @@ export default function MicroIterChart({
   // Derived from `items` on every render, so it updates as new micro-iterations arrive.
   const detailMicros = micros.filter((micro) => lookup(selectedMaster ?? -1, micro));
   const pct = (num: number, den: number) => (den > 0 ? (100 * num) / den : null);
-  // Number of added constraints with is_inc = false at (selectedMaster, micro), from /added_constraints.
+  // Number of added constraints (sum of n_constraints over the families with is_inc = false) at
+  // (selectedMaster, micro), from /added_constraints.
   // The saturation measured at micro k concerns the constraints added at micro k-1, so look up k-1.
   const nbNotInc = new Map<number, number>();
   for (const a of addedItems) {
     if (a.sub_name === sub && a.num_master_iter === selectedMaster) {
-      nbNotInc.set(a.num_micro_iter, a.constraints.filter((c) => !c.is_inc).length);
+      nbNotInc.set(a.num_micro_iter, a.constraints.reduce((sum, c) => (c.is_inc ? sum : sum + c.n_constraints), 0));
     }
   }
 
